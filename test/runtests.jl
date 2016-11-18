@@ -1,5 +1,12 @@
 #!/usr/bin/env julia
 
+global prev_theme=nothing
+
+if haskey(ENV, "GADFLY_THEME")
+    prev_theme = ENV["GADFLY_THEME"]
+    pop!(ENV, "GADFLY_THEME")
+end
+
 using RDatasets, Gadfly, Compat
 
 tests = [
@@ -42,6 +49,7 @@ tests = [
     ("histogram2d",                           6inch, 3inch),
     ("rectbin",                               6inch, 3inch),
     ("density",                               6inch, 3inch),
+    ("density_dark",                          6inch, 3inch),
     ("colorful_density",                      6inch, 3inch),
     ("explicit_colorkey_title",               6inch, 3inch),
     ("explicit_subplot_titles",               6inch, 3inch),
@@ -70,6 +78,7 @@ tests = [
     ("ordered_line",                          6inch, 3inch),
     ("nan_skipping",                          6inch, 3inch),
     ("hexbin",                                6inch, 3inch),
+    ("hexbin_dark",                           6inch, 3inch),
     ("spy",                                   6inch, 3inch),
     ("issue177",                              6inch, 3inch),
     ("ribbon",                                6inch, 3inch),
@@ -104,7 +113,11 @@ tests = [
     ("step",                                  6inch, 3inch),
     ("auto_enumerate",                        6inch, 3inch),
     ("coord_limits",                          6inch, 6inch),
-    ("rug",                                   6inch, 3inch)
+    ("rug",                                   6inch, 3inch),
+    ("beeswarm",                              6inch, 3inch),
+    ("issue871",                              6inch, 3inch),
+    ("issue882",                              6inch, 3inch),
+    ("vector",                                3.3inch, 3.3inch)
 ]
 
 
@@ -179,10 +192,12 @@ function run_tests(output_filename)
     close(output)
 end
 
+if prev_theme !== nothing
+    ENV["GADFLY_THEME"] = prev_theme
+end
+
 
 run_tests("output/test.html")
 #@time run_tests("output/test.html")
 #@profile run_tests("output/test.html")
 #Profile.print()
-
-

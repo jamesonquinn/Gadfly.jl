@@ -9,16 +9,17 @@ macro varset(name::Symbol, table)
 
     names = Any[]
     vars = Any[]
-    defaults = Any[]
     parameters = Any[]
     parameters_expr = Expr(:parameters)
+    inherit_parameters = Any[]
+    inherit_parameters_expr = Expr(:parameters)
 
     for row in table
-        if typeof(row) == Expr && row.head == :line
+        if isa(row, Expr) && row.head == :line
             continue
         end
 
-        if typeof(row) == Symbol
+        if isa(row, Symbol)
             var = row
             typ = :Any
             default = :nothing
@@ -33,9 +34,10 @@ macro varset(name::Symbol, table)
 
         push!(names, var)
         push!(vars, :($(var)::$(typ)))
-        push!(defaults, default)
         push!(parameters, Expr(:kw, var, default))
+        push!(inherit_parameters, Expr(:kw, var, :(b.$var)))
         parameters_expr = Expr(:parameters, parameters...)
+        inherit_parameters_expr = Expr(:parameters, inherit_parameters...)
     end
 
     new_with_defaults = Expr(:call, :new, names...)
@@ -45,21 +47,12 @@ macro varset(name::Symbol, table)
         type $(name)
             $(vars...)
 
-            function $(name)()
-                new($(defaults...))
-            end
-
             function $(name)($(parameters_expr))
                 $(new_with_defaults)
             end
 
-            # shallow copy constructor
-            function $(name)(a::$(name))
-                b = new()
-                for name in fieldnames($(name))
-                    setfield!(b, name, getfield(a, name))
-                end
-                b
+            function $(name)($(inherit_parameters_expr), b::$name)
+                $(new_with_defaults)
             end
         end
 
@@ -70,5 +63,3 @@ macro varset(name::Symbol, table)
 
     esc(ex)
 end
-
-

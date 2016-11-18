@@ -149,27 +149,27 @@ end
 
 function make_labeler(scale::ContinuousScale)
     if scale.labels != nothing
-        function f(xs)
+        function(xs)
             return [scale.labels(x) for x in xs]
         end
     elseif scale.format == nothing
         scale.trans.label
     else
-        function f(xs)
+        function(xs)
             return scale.trans.label(xs, scale.format)
         end
     end
 end
 
 
-const x_vars = [:x, :xmin, :xmax, :xintercept, :xviewmin, :xviewmax]
+const x_vars = [:x, :xmin, :xmax, :xintercept, :xviewmin, :xviewmax, :xend]
 const y_vars = [:y, :ymin, :ymax, :yintercept, :middle,
                 :upper_fence, :lower_fence, :upper_hinge, :lower_hinge,
-                :yviewmin, :yviewmax]
+    :yviewmin, :yviewmax, :yend]
 
 function continuous_scale_partial(vars::Vector{Symbol},
                                   trans::ContinuousScaleTransform)
-    function f(; minvalue=nothing, maxvalue=nothing, labels=nothing, format=nothing, minticks=2,
+    function f1(; minvalue=nothing, maxvalue=nothing, labels=nothing, format=nothing, minticks=2,
                  maxticks=10, scalable=true)
         ContinuousScale(vars, trans, minvalue=minvalue, maxvalue=maxvalue,
                         labels=labels, format=format, minticks=minticks,
@@ -257,7 +257,7 @@ function apply_scale(scale::ContinuousScale,
             elseif var in y_vars
                 label_var = :y_label
             else
-                label_var = symbol(@sprintf("%s_label", string(var)))
+                label_var = Symbol(var, "_label")
             end
 
             if in(label_var, Set(fieldnames(aes)))
@@ -418,7 +418,7 @@ function apply_scale(scale::DiscreteScale, aess::Vector{Gadfly.Aesthetics},
                      datas::Gadfly.Data...)
     for (aes, data) in zip(aess, datas)
         for var in scale.vars
-            label_var = symbol(@sprintf("%s_label", string(var)))
+            label_var = Symbol(var, "_label")
 
             if getfield(data, var) === nothing
                 continue
@@ -503,17 +503,29 @@ function element_aesthetics(scale::DiscreteColorScale)
 end
 
 
+function default_discrete_colors(n)
+    convert(Vector{Color},
+         distinguishable_colors(n, [LCHab(70, 60, 240)],
+             transform=c -> deuteranopic(c, 0.5),
+             lchoices=Float64[65, 70, 75, 80],
+             cchoices=Float64[0, 50, 60, 70],
+             hchoices=linspace(0, 330, 24),
+         )
+     )
+end
+
 # Common discrete color scales
-function color_discrete_hue(; levels=nothing, order=nothing,
+function color_discrete_hue(f=default_discrete_colors;
+                            levels=nothing,
+                            order=nothing,
                             preserve_order=true)
+
     DiscreteColorScale(
-        h -> convert(Vector{Color},
-             distinguishable_colors(h, [LCHab(70, 60, 240)],
-                                    transform=c -> deuteranopic(c, 0.5),
-                                    lchoices=Float64[65, 70, 75, 80],
-                                    cchoices=Float64[0, 50, 60, 70],
-                                    hchoices=linspace(0, 330, 24))),
-        levels=levels, order=order, preserve_order=preserve_order)
+        default_discrete_colors,
+        levels=levels,
+        order=order,
+        preserve_order=preserve_order,
+    )
 end
 
 @deprecate discrete_color_hue(; levels=nothing, order=nothing, preserve_order=true) color_discrete_hue(; levels=levels, order=order, preserve_order=preserve_order)
@@ -524,11 +536,11 @@ const color_discrete = color_discrete_hue
 @deprecate discrete_color(; levels=nothing, order=nothing, preserve_order=true) color_discrete(; levels=levels, order=order, preserve_order=preserve_order)
 
 
-color_discrete_manual(colors...; levels=nothing, order=nothing) = color_discrete_manual(map(Gadfly.parse_colorant, colors)...; levels=levels, order=order)
+color_discrete_manual(colors::AbstractString...; levels=nothing, order=nothing) = color_discrete_manual(map(Gadfly.parse_colorant, colors)...; levels=levels, order=order)
 
 function color_discrete_manual(colors::Color...; levels=nothing, order=nothing)
     cs = [colors...]
-    function f(n)
+    f = function(n)
         distinguishable_colors(n, cs)
     end
     DiscreteColorScale(f, levels=levels, order=order)
@@ -564,7 +576,7 @@ function apply_scale(scale::DiscreteColorScale,
     end
     colors = convert(Vector{RGB{Float32}}, scale.f(length(scale_levels)))
 
-    color_map = @compat Dict([color => string(label)
+    color_map = @compat Dict([(color, string(label))
                               for (label, color) in zip(scale_levels, colors)])
     function labeler(xs)
         [color_map[x] for x in xs]
@@ -611,18 +623,18 @@ end
 
 
 function continuous_color_scale_partial(trans::ContinuousScaleTransform)
-    function lch_diverge2(l0=30, l1=100, c=40, h0=260, h1=10, hmid=20, power=1.5)
+    lch_diverge2 = function f3(l0=30, l1=100, c=40, h0=260, h1=10, hmid=20, power=1.5)
         lspan = l1 - l0
         hspan1 = hmid - h0
         hspan0 = h1 - hmid
-        function f(r)
+        function(r)
             r2 = 2r - 1
             return LCHab(min(80, l1 - lspan * abs(r2)^power), max(10, c * abs(r2)),
                          (1-r)*h0 + r * h1)
         end
     end
 
-    function f(; minvalue=nothing, maxvalue=nothing, colormap=lch_diverge2())
+    function f2(; minvalue=nothing, maxvalue=nothing, colormap=lch_diverge2())
         ContinuousColorScale(colormap, trans, minvalue=minvalue, maxvalue=maxvalue)
     end
 end
@@ -710,7 +722,7 @@ function apply_scale(scale::ContinuousColorScale,
         color_key_labels = Dict{Color, AbstractString}()
 
         tick_labels = scale.trans.label(ticks)
-        for (i, j, label) in zip(ticks, ticks[2:end], tick_labels)
+        for (i, j, label) in zip(ticks, ticks[2:end], tick_labels[1:end-1])
             r = (i - cmin) / cspan
             c = scale.f(r)
             color_key_colors[c] = r

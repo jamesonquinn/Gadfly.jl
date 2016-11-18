@@ -2,7 +2,6 @@ __precompile__()
 
 module Gadfly
 
-using Codecs
 using Colors
 using Compat
 using Compose
@@ -15,14 +14,13 @@ using Showoff
 import Iterators
 import Iterators: distinct, drop, chain
 import Compose: draw, hstack, vstack, gridstack, isinstalled, parse_colorant, parse_colorant_vec
-import Base: +, -, /, *,
+@compat import Base: +, -, /, *,
              copy, push!, start, next, done, show, getindex, cat,
-             writemime, isfinite, display
+             show, isfinite, display
 import Distributions: Distribution
 
 export Plot, Layer, Theme, Col, Scale, Coord, Geom, Guide, Stat, render, plot,
-       layer, spy, set_default_plot_size, set_default_plot_format,
-       prepare_display
+       style, layer, spy, set_default_plot_size, set_default_plot_format, prepare_display
 
 
 # Re-export some essentials from Compose
@@ -32,6 +30,17 @@ export SVGJS, SVG, PGF, PNG, PS, PDF, draw, inch, mm, cm, px, pt, color, @colora
 function __init__()
     # Define an XML namespace for custom attributes
     Compose.xmlns["gadfly"] = "http://www.gadflyjl.org/ns"
+    if haskey(ENV, "GADFLY_THEME")
+        theme = ENV["GADFLY_THEME"]
+        try
+            push_theme(Symbol(strip(theme)))
+        catch err
+            warn("Error loading Gadfly theme $theme (set by GADFLY_THEME env variable)")
+            show(err)
+        end
+    else
+        push_theme(Juno.isactive() ? :dark : :default)
+    end
 end
 
 
@@ -41,6 +50,7 @@ element_aesthetics(::Any) = []
 input_aesthetics(::Any) = []
 output_aesthetics(::Any) = []
 default_scales(::Any) = []
+default_scales(x::Any, t) = default_scales(x)
 default_statistic(::Any) = Stat.identity()
 element_coordinate_type(::Any) = Coord.cartesian
 
@@ -58,10 +68,11 @@ include("ticks.jl")
 include("color_misc.jl")
 include("varset.jl")
 include("shapes.jl")
-include("theme.jl")
 include("data.jl")
 include("aesthetics.jl")
 include("mapping.jl")
+include("scale.jl")
+include("theme.jl")
 
 
 # The layer and plot functions can also take functions that are evaluated with
@@ -134,7 +145,7 @@ Creates layers based on elements
 
 ### Args
 * data_source: The data source as a dataframe
-* elements: The elements 
+* elements: The elements
 * mapping: mapping
 
 ### Returns
@@ -211,7 +222,7 @@ type Plot
 
     function Plot()
         new(Layer[], nothing, Data(), ScaleElement[], StatisticElement[],
-            nothing, GuideElement[], default_theme)
+            nothing, GuideElement[], current_theme())
     end
 end
 
@@ -559,9 +570,18 @@ function render_prepare(plot::Plot)
 
     unscaled_aesthetics = setdiff(used_aesthetics, scaled_aesthetics)
 
+    _theme(plt, lyr) = lyr.theme == nothing ? plt.theme : lyr.theme
+
     # Add default scales for statistics.
-    for element in chain(plot.statistics, [l.geom for l in plot.layers], layer_stats...)
-        for scale in default_scales(element)
+    layer_stats_with_theme = map(plot.layers, layer_stats) do l, stats
+        map(s->(s, _theme(l, plot)), collect(stats))
+    end
+
+    for element in chain([(s, plot.theme) for s in plot.statistics],
+                         [(l.geom, _theme(plot, l)) for l in plot.layers],
+                         layer_stats_with_theme...)
+
+        for scale in default_scales(element...)
             # Use the statistics default scale only when it covers some
             # aesthetic that is not already scaled.
             scale_aes = Set(element_aesthetics(scale))
@@ -600,8 +620,8 @@ function render_prepare(plot::Plot)
 
         end
 
-        if haskey(default_aes_scales[t], var)
-            scale = default_aes_scales[t][var]
+        if scale_exists(t, var)
+            scale = get_scale(t, var, plot.theme)
             scale_aes = Set(element_aesthetics(scale))
             for var in scale_aes
                 scales[var] = scale
@@ -622,8 +642,8 @@ function render_prepare(plot::Plot)
             end
         end
 
-        if haskey(default_aes_scales[t], var)
-            scale = default_aes_scales[t][var]
+        if scale_exists(t, var)
+            scale = get_scale(t, var, plot.theme)
             scale_aes = Set(element_aesthetics(scale))
             for var in scale_aes
                 scales[var] = scale
@@ -675,11 +695,11 @@ function render_prepare(plot::Plot)
         push!(statistics, default_statistic(guide))
     end
 
-    function mapped_and_used(vs)
-        any([in(v, mapped_aesthetics) && in(v, used_aesthetics) for v in vs])
+    mapped_and_used = function(vs)
+        any(Bool[in(v, mapped_aesthetics) && in(v, used_aesthetics) for v in vs])
     end
 
-    function choose_name(vs, fallback)
+    choose_name = function(vs, fallback)
         for v in vs
             if haskey(plot.data.titles, v)
                 return plot.data.titles[v]
@@ -860,15 +880,16 @@ function render_prepared(plot::Plot,
     # IV. Geometries
     themes = Theme[layer.theme === nothing ? plot.theme : layer.theme
                    for layer in plot.layers]
+    zips = trim_zip(plot.layers, layer_aess,
+                                                   layer_subplot_aess,
+                                                   layer_subplot_datas,
+               themes)
 
     compose!(plot_context,
              [compose(context(order=layer.order), render(layer.geom, theme, aes,
                                                          subplot_aes, subplot_data,
                                                          scales))
-              for (layer, aes, subplot_aes, subplot_data, theme) in zip(plot.layers, layer_aess,
-                                                   layer_subplot_aess,
-                                                   layer_subplot_datas,
-                                                   themes)]...)
+              for (layer, aes, subplot_aes, subplot_data, theme) in zips]...)
 
     # V. Guides
     guide_contexts = Any[]
@@ -945,30 +966,31 @@ hstack(c::Context, p::Plot) = hstack(c, render(p))
 
 gridstack(ps::Matrix{Plot}) = gridstack(map(render, ps))
 
-# writemime functions for all supported compose backends.
+# show functions for all supported compose backends.
 
 
-function writemime(io::IO, m::MIME"text/html", p::Plot)
+@compat function show(io::IO, m::MIME"text/html", p::Plot)
     buf = IOBuffer()
     svg = SVGJS(buf, Compose.default_graphic_width,
                 Compose.default_graphic_height, false)
     draw(svg, p)
-    writemime(io, m, svg)
+    show(io, m, svg)
 end
 
 
-function writemime(io::IO, m::MIME"image/svg+xml", p::Plot)
+@compat function show(io::IO, m::MIME"image/svg+xml", p::Plot)
     buf = IOBuffer()
     svg = SVG(buf, Compose.default_graphic_width,
               Compose.default_graphic_height, false)
     draw(svg, p)
-    writemime(io, m, svg)
+    show(io, m, svg)
 end
 
 
 try
     getfield(Compose, :Cairo) # throws if Cairo isn't being used
-    function writemime(io::IO, ::MIME"image/png", p::Plot)
+    global show
+    @compat function show(io::IO, ::MIME"image/png", p::Plot)
         draw(PNG(io, Compose.default_graphic_width,
                  Compose.default_graphic_height), p)
     end
@@ -976,13 +998,14 @@ end
 
 try
     getfield(Compose, :Cairo) # throws if Cairo isn't being used
-    function writemime(io::IO, ::MIME"application/postscript", p::Plot)
+    global show
+    @compat function show(io::IO, ::MIME"application/postscript", p::Plot)
         draw(PS(io, Compose.default_graphic_width,
-             Compose.default_graphic_height), p)
+             Compose.default_graphic_height), p);
     end
 end
 
-function writemime(io::IO, ::MIME"text/plain", p::Plot)
+@compat function show(io::IO, ::MIME"text/plain", p::Plot)
     write(io, "Plot(...)")
 end
 
@@ -1017,19 +1040,19 @@ function display(p::Plot)
             @try_display return display(displays[i], p)
         end
     end
-    invoke(display,(Any,),p)
+    invoke(display, Tuple{Any}, p)
 end
 
 
 function open_file(filename)
-    if OS_NAME == :Darwin
+    if is_apple()
         run(`open $(filename)`)
-    elseif OS_NAME == :Linux || OS_NAME == :FreeBSD
+    elseif is_linux() || is_bsd()
         run(`xdg-open $(filename)`)
-    elseif OS_NAME == :Windows
+    elseif is_windows()
         run(`$(ENV["COMSPEC"]) /c start $(filename)`)
     else
-        warn("Showing plots is not supported on OS $(string(OS_NAME))")
+        warn("Showing plots is not supported on OS $(string(Compat.KERNEL))")
     end
 end
 
@@ -1072,10 +1095,10 @@ function display(d::REPLDisplay, ::MIME"text/html", p::Plot)
           </head>
             <body>
             <script charset="utf-8">
-                $(readall(Compose.snapsvgjs))
+                $(readstring(Compose.snapsvgjs))
             </script>
             <script charset="utf-8">
-                $(readall(gadflyjs))
+                $(readstring(gadflyjs))
             </script>
 
             $(plotsvg)
@@ -1104,8 +1127,22 @@ function display(d::REPLDisplay, ::MIME"application/pdf", p::Plot)
     open_file(filename)
 end
 
+# Display in Juno
 
-include("scale.jl")
+import Juno: Juno, @render, media, Media, Hiccup
+
+media(Plot, Media.Plot)
+
+@render Juno.PlotPane p::Plot begin
+    x, y = Juno.plotsize()
+    set_default_plot_size(x*Gadfly.px, y*Gadfly.px)
+    HTML(stringmime("text/html", p))
+end
+
+@render Juno.Editor p::Gadfly.Plot begin
+    Juno.icon("graph")
+end
+
 include("coord.jl")
 include("geometry.jl")
 include("guide.jl")
@@ -1115,46 +1152,81 @@ include("statistics.jl")
 # All aesthetics must have a scale. If none is given, we use a default.
 # The default depends on whether the input is discrete or continuous (i.e.,
 # PooledDataVector or DataVector, respectively).
-const default_aes_scales = @compat Dict{Symbol, Dict}(
-        :distribution => Dict{Symbol, Any}(:x => Scale.x_distribution(),
-                                           :y => Scale.y_distribution()),
-        :functional => Dict{Symbol, Any}(:z => Scale.z_func(),
-                                         :y => Scale.y_func()),
-        :numerical => Dict{Symbol, Any}(:x           => Scale.x_continuous(),
-                                        :xmin        => Scale.x_continuous(),
-                                        :xmax        => Scale.x_continuous(),
-                                        :xintercept  => Scale.x_continuous(),
-                                        :y           => Scale.y_continuous(),
-                                        :ymin        => Scale.y_continuous(),
-                                        :ymax        => Scale.y_continuous(),
-                                        :yintercept  => Scale.y_continuous(),
-                                        :middle      => Scale.y_continuous(),
-                                        :upper_fence => Scale.y_continuous(),
-                                        :lower_fence => Scale.y_continuous(),
-                                        :upper_hinge => Scale.y_continuous(),
-                                        :lower_hinge => Scale.y_continuous(),
-                                        :xgroup      => Scale.xgroup(),
-                                        :ygroup      => Scale.ygroup(),
-                                        :color       => Scale.color_continuous(),
-                                        :shape       => Scale.shape_discrete(),
-                                        :group       => Scale.group_discrete(),
-                                        :label       => Scale.label(),
-                                        :size        => Scale.size_continuous()),
-        :categorical => Dict{Symbol, Any}(:x          => Scale.x_discrete(),
-                                          :xmin       => Scale.x_discrete(),
-                                          :xmax       => Scale.x_discrete(),
-                                          :xintercept => Scale.x_discrete(),
-                                          :y          => Scale.y_discrete(),
-                                          :ymin       => Scale.y_discrete(),
-                                          :ymax       => Scale.y_discrete(),
-                                          :yintercept => Scale.y_discrete(),
-                                          :xgroup     => Scale.xgroup(),
-                                          :ygroup     => Scale.ygroup(),
-                                          :color      => Scale.color_discrete(),
-                                          :shape      => Scale.shape_discrete(),
-                                          :group      => Scale.group_discrete(),
-                                          :label      => Scale.label()))
+const default_aes_scales = Dict{Symbol, Dict}(
 
+    :distribution => Dict{Symbol, Any}(
+        :x => Scale.x_distribution(),
+        :y => Scale.y_distribution()
+    ),
+
+    :functional => Dict{Symbol, Any}(
+        :z => Scale.z_func(),
+        :y => Scale.y_func()
+    ),
+
+    :numerical => Dict{Symbol, Any}(
+        :x           => Scale.x_continuous(),
+        :xmin        => Scale.x_continuous(),
+        :xmax        => Scale.x_continuous(),
+        :xintercept       => Scale.x_continuous(),
+        :xend  => Scale.x_continuous(),
+        :yend  => Scale.y_continuous(),
+        :y           => Scale.y_continuous(),
+        :ymin        => Scale.y_continuous(),
+        :ymax        => Scale.y_continuous(),
+        :yintercept  => Scale.y_continuous(),
+        :middle      => Scale.y_continuous(),
+        :upper_fence => Scale.y_continuous(),
+        :lower_fence => Scale.y_continuous(),
+        :upper_hinge => Scale.y_continuous(),
+        :lower_hinge => Scale.y_continuous(),
+        :xgroup      => Scale.xgroup(),
+        :ygroup      => Scale.ygroup(),
+        :shape       => Scale.shape_discrete(),
+        :group       => Scale.group_discrete(),
+        :label       => Scale.label(),
+        :size        => Scale.size_continuous()
+    ),
+
+    :categorical => Dict{Symbol, Any}(
+        :x          => Scale.x_discrete(),
+        :xmin       => Scale.x_discrete(),
+        :xmax       => Scale.x_discrete(),
+        :xintercept => Scale.x_discrete(),
+        :xend       => Scale.x_discrete(),
+        :yend       => Scale.y_discrete(),
+        :y          => Scale.y_discrete(),
+        :ymin       => Scale.y_discrete(),
+        :ymax       => Scale.y_discrete(),
+        :yintercept => Scale.y_discrete(),
+        :xgroup     => Scale.xgroup(),
+        :ygroup     => Scale.ygroup(),
+        :shape      => Scale.shape_discrete(),
+        :group      => Scale.group_discrete(),
+        :label      => Scale.label()
+    )
+)
+
+
+function get_scale{t,var}(::Val{t}, ::Val{var}, theme::Theme)
+    default_aes_scales[t][var]
+end
+
+
+function get_scale(t::Symbol, var::Symbol, theme::Theme)
+    get_scale(Val{t}(), Val{var}(), theme)
+end
+
+
+function scale_exists(t::Symbol, var::Symbol)
+    if !haskey(default_aes_scales, t) || !haskey(default_aes_scales[t], var)
+        method = methods(get_scale, (Val{t}, Val{var}, Theme))
+        catchall = methods(get_scale, (Val{1}, Val{nothing}, Theme))
+        first(method) !== first(catchall)
+    else
+        true
+    end
+end
 
 
 # Determine whether the input is categorical or numerical
